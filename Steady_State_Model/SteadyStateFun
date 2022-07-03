@@ -1,0 +1,148 @@
+function [OBJ, POW, WEI, power, weight] = SteadyStateFun(DV, dispPlot)
+
+%% *System Definition*
+global n_r n_R n_L n_t n_f v_ref T_l;
+% v_ref reference wind speed at h_ref m height [m/s]
+% T_l  Axial Tension from lifter kite
+
+R = DV(1:n_R);  % Radius of TRPT segments top to bottom [m] 
+L_t = DV(n_R+1:n_R+n_L); % Thether lengths in TRPT top to bottom [m]
+l_b = DV(end-3);    % Blade length [m]
+beta = deg2rad(DV(end-2));  % Elevation angle [rad]
+TSR = DV(end-1);    % Tip speed ratio of rotor
+alpha = DV(end);    % Pitch angle of wing [°]
+
+% *Wind Conditions*            
+h_ref = 5;    % reference height for ref wind speed [m]
+psi = 0.2;    % wind shear exponent for high crops and shrubs
+rho = 1.225;  % Air density [kg/m^3]
+
+% *Rotor Parameters*
+l_c = l_b/5;  % Chord length of blade [m]
+l_bh = l_b/20; % average Blade debth [m]
+n_b = 3;    % Number of blades
+
+% *TRPT Parameters*
+n_fp = 20;    % number of parts the frame is divided in
+n_tp = 5;    % number of parts the tether halfs are divided in
+
+% Ground Station Parameters
+eta_gen = 0.95;
+
+% *Placeholders*
+delta = zeros(1, n_L);  % deformation angle at each TRPT segment
+theta_0 = zeros(1, n_R);  % Azimuth position of each disc
+
+%% Initial guesses
+A_dt = 6*0.0015^2/4*pi; % Thether diameter [m]
+d_t = sqrt(A_dt/n_t/pi)*2;
+d_f = 0.004;  % diameter of frame tubes [m]
+
+L_s = L_t*0.8;   % approximation for segment length
+h_hub = sum(L_s)*sin(beta)+R(end);
+v_w = v_ref*(h_hub/h_ref)^psi;
+omega = v_w*TSR/(R(1)+l_b/2);    % Rotational speed [rad/s]
+C_p = 0.3;               % guess value for power factor
+eta_ts = 0.8;               % guess value for trpt efficiency
+A = pi*((R(1:n_r)+l_b/2).^2-(R(1:n_r)-l_b/2).^2);   % Swept area
+P_pot = 1/2*rho*A*v_w^3*cos(beta);
+P_rot = P_pot*C_p*eta_ts;
+Q_rot = P_pot/omega;    % torque in rotor(s)
+T_rot = ones(1, n_r)*1/2*rho*A*v_w^3*cos(beta)*0.05;
+Q = ones(1, n_R)*sum(Q_rot);    % torque in each segment  
+T = ones(1, n_R)*(T_l+sum(T_rot));         % Axial Tension acting on each TRPT segment
+
+%% *Start a convergence loop* 
+count = 0;
+Q_genNet = 0;
+
+while(abs(Q(end)-Q_genNet)>1)
+    count = count+1;
+    Q_genNet = Q(end);
+    if(count>10)
+        disp("Error: Convergence loop exceeds maximum iteration limit")
+        break
+    end
+    
+% *TRPT deformation* 
+    for i = 1:n_L
+        delta(i) = acos((-Q(i)^2 + sqrt(Q(i)^4-T(i)^2*Q(i)^2*(L_t(i)^2-R(i+1)^2-R(i)^2) +T(i)^4*R(i+1)^2*R(i)^2))/(R(i+1)*R(i)*T(i)^2));
+        delta(i) = abs(delta(i));
+        theta_0(i+1) = theta_0(i)+delta(i); % Azimoth position of each disc
+        L_s(i) = sqrt(L_t(i)^2 -R(i+1)^2 -R(i)^2 +2*R(i+1)*R(i)*cos(delta(i)));  
+        if L_t(i)<R(i+1)+R(i)
+            delta_c = acos( (R(i+1)^2+R(i)^2-L_t(i)^2) / (2*R(i+1)*R(i)) );
+            if delta(i)>delta_c
+                delta(i)=delta_c;
+            end
+        else
+            delta_c(i) = acos( (R(i+1)^2+R(i)^2-L_t(i)^2 + sqrt(R(i+1)^4+R(i)^4+L_t(i)^4 -2*R(i+1)^2*L_t(i)^2 -2*R(i)^2*L_t(i)^2 -2*R(i+1)^2*R(i)^2)) / (2*R(i+1)*R(i)) );
+        end
+    end
+    L_s = real(L_s);
+    delta = real(delta);
+    
+% *BEM calculations in AeroDyn*
+    for i = 1:n_r 
+        h_hub = sum(L_s(i:end))*sin(beta)+R(end);
+        r_hub = R(i)-l_b/2;
+        v_w = v_ref*(h_hub/h_ref)^psi;
+        if h_hub<r_hub
+            disp("Error: The hub radius is greater than the hub height")
+            h_hub=r_hub;
+        end
+        %BEMshftTilt(n_b, l_b, l_c, alpha, beta, r_hub, h_hub, omega, v_w, psi);
+        [P_rot(i), Q_rot(i), T_rot(i)] = BEMshftTilt(n_b, l_b, l_c, alpha, beta, r_hub, h_hub, omega, v_w, psi);
+    end
+
+% *Tether Drag*
+    % [Q_tDrag, T_tDrag, Node_pos, theta] = tether_dragV5(R, L_s, beta, n_t, n_tp, d_t, theta_0, omega, v_ref, h_ref, psi); 
+    [Q_tDrag, T_tDrag, Node_pos, theta, d_t] = tether_dragV6(R, L_s, beta, n_t, n_tp, theta_0, omega, v_ref, h_ref, psi, T);
+
+% *Frame Drag*
+    [Q_fDrag, T_fDrag] = frame_dragV5(R, L_s, beta, n_f, n_fp, d_f, theta_0, omega, v_ref, h_ref, psi);
+    
+% *Update Tension T andTorque Q throughout system*
+    for i = 1:n_r   % For rotor polygons
+        T(i) = sum(T_rot(1:i)) +sum(T_tDrag(1:i))+sum(T_fDrag(1:i)) +T_l;
+        Q(i) = sum(Q_rot(1:i)) +sum(Q_tDrag(1:i))+sum(Q_fDrag(1:i));  % losses are found as negative values
+    end
+    
+    for i = n_r+1:length(T) % For other TRPT polygons
+        T(i) = T(i-1)+T_fDrag(i)+T_tDrag(i);
+        Q(i) = Q(i-1)+Q_fDrag(i)+Q_tDrag(i);
+    end
+    
+end
+
+% % *Member strength and weight*
+[WEI, WEI_g, WEI_f, WEI_t, WEI_b, WEI_l] = getWEI(R, L_s, L_t, T, Q, delta, l_b, l_c, l_bh, n_b); 
+
+    
+% *Calculate final Power and Objective value
+
+P_pot = 1/2*rho*A*v_w^3*cos(beta)*n_r;
+eta_trpt = Q(end)*omega/sum(P_rot);
+C_p = sum(P_rot) / sum(P_pot);
+
+C_tot = -C_p*eta_trpt*eta_gen;
+POW = Q(end)*omega*eta_gen;    % Generator output
+Pd = -real(POW/WEI);  % Power density
+PHC =- POW/(1/2*rho*l_b*l_c*n_b*n_r*v_w^3*cos(beta));
+
+OBJ = Pd;
+
+power = [C_p, eta_trpt, eta_gen, C_p*eta_trpt*eta_gen];     % 
+weight =  [WEI_g/WEI, WEI_f/WEI, WEI_t/WEI, WEI_b/WEI, WEI_l/WEI];
+
+if dispPlot
+    txt = ["Power output: " + round(POW) + " W" ,"Total weight:  " + round(WEI) + " kg","Power Density:  " + round(-Pd) + " W/kg"];
+    plotTopology(Node_pos, R, L_s, l_b, n_r, beta, theta, txt);
+    plotOutput(WEI, WEI_g, WEI_f, WEI_t, WEI_b, WEI_l, POW, sum(P_rot), sum(P_pot), eta_trpt, eta_gen);
+    disp("Power harvesting factor is: ");
+    disp(-PHC);
+end
+
+
+
+end
