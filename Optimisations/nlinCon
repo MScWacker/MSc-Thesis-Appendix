@@ -1,0 +1,107 @@
+function [c,ceq] = nlinCon(DV)
+    global n_r n_R n_L n_t n_f v_ref T_l;  
+    
+    % *System Definition*
+    R = DV(1:n_R);  % Radius of TRPT segments top to bottom [m] 
+    L_t = DV(n_R+1:n_R+n_L); % Thether lengths in TRPT top to bottom [m]
+    l_b = DV(end-3);    % Blade length [m]
+    beta = deg2rad(DV(end-2));  % Elevation angle [rad]
+    TSR = DV(end-1);    % Tip speed ratio of rotor
+    alpha = DV(end);    % Pitch angle of wing [°]
+    
+    % *Wind Conditions*
+%     v_ref = 5; % reference wind speed at 50 m height [m/s]
+    h_ref = 5; % reference height for ref wind speed [m]
+    psi = 0.2;  % wind shear exponent for high crops and shrubs
+    rho = 1.225;% Air density [kg/m^3]
+
+    % *Lifter Parameters*
+    % T_l = 2500;  % Axial Tension from lifter kite
+
+    % *Rotor Parameters*
+    l_c = l_b/10;  % Chord length of blade [m]
+    n_b = 3;    % Number of blades
+
+    % *TRPT Parameters*
+    d_f = 0.004;  % diameter of frame tubes [m]
+    n_fp = 20;    % number of parts the frame is divided in
+    n_tp = 5;    % number of parts the tether halfs are divided in
+    d_t = 0.0015; % Thether diameter [m]
+    sf = 2; %safety factor for deformation
+
+    % *Placeholders*
+    delta = zeros(1, n_L);  % deformation angle at each TRPT segment
+    delta_c = zeros(1, n_L);  % critical deformation angle at each TRPT segment
+    theta_0 = zeros(1, n_R);  % Azimuth position of each disc
+    
+    %% Initial guesses
+    L_s = L_t*0.8;   % approximation for segment length
+    h_hub = sum(L_s)*sin(beta)+R(end);
+    v_w = v_ref*(h_hub/h_ref)^psi;
+    omega = v_w*TSR/(R(1)+l_b/2);    % Rotational speed [m/s]
+    C_p = 0.3;               % guess value for power factor
+    eta_ts = 0.8;               % guess value for trpt efficiency
+    A = pi*((R(1:n_r)+l_b/2).^2-(R(1:n_r)-l_b/2).^2);   % Swept area
+    P_pot = 1/2*rho*A*v_w^3*cos(beta);
+    P_rot = P_pot*C_p*eta_ts;
+    Q_rot = P_rot/omega;    % torque in rotor(s)
+    T_rot = ones(1, n_r)*1/2*rho.*A'*v_w^3*cos(beta)*0.05;
+    Q = ones(1, n_R)*sum(Q_rot)*0.9;    % torque in each segment  
+    T = ones(1, n_R)*(T_l+sum(T_rot));         % Axial Tension acting on each TRPT segment
+
+    % *TRPT deformation* 
+    for i = 1:n_L
+        if L_t(i)<R(i+1)+R(i)
+            % delta_lim
+            delta_c(i) = acos( (R(i+1)^2+R(i)^2-L_t(i)^2) / (2*R(i+1)*R(i)) );
+        else
+            % delta_c
+            delta_c(i) = acos( (R(i+1)^2+R(i)^2-L_t(i)^2 + sqrt(R(i+1)^4+R(i)^4+L_t(i)^4 -2*R(i+1)^2*L_t(i)^2 -2*R(i)^2*L_t(i)^2 -2*R(i+1)^2*R(i)^2)) / (2*R(i+1)*R(i)) );
+            % could also be: delta_c(i) = acos( (R(i+1)^2+R(i)^2-L_t(i)^2 - sqrt(R(i+1)^4+R(i)^4+L_t(i)^4 -2*R(i+1)^2*L_t(i)^2 -2*R(i)^2*L_t(i)^2 -2*R(i+1)^2*R(i)^2)) / (2*R(i+1)*R(i)) );      
+        end
+        delta(i) = acos((-Q(i)^2 + sqrt(Q(i)^4 -T(i)^2*Q(i)^2*(L_t(i)^2-R(i+1)^2-R(i)^2) +T(i)^4*R(i+1)^2*R(i)^2)) /(R(i+1)*R(i)*T(i)^2));
+%         if ~isreal(delta(i))    
+%             disp("delta is not real. Torque to high?")
+%         end
+        delta(i) = abs(delta(i));
+        theta_0(i+1) = theta_0(i)+abs(delta(i)); % Azimoth position of each disc
+        L_s(i) = sqrt(L_t(i)^2 -R(i+1)^2 -R(i)^2 +2*R(i+1)*R(i)*cos(abs(delta(i))));
+        if ~isreal(L_s(i))
+            disp("L_s(i) is not real. Torque to high?")
+            L_s(i) = real(L_s(i));
+        end
+        
+%         f_geom = L_t(i)/((R(i+1)+R(i))/2);
+%         delta_c(i) = real(acos(1-f_geom^2/2+f_geom/2*sqrt(f_geom^2-4))); 
+    end
+    delta_c = real(delta_c);    
+        
+% *Tether Drag*
+    [Q_tDrag, T_tDrag, Node_pos, theta] = tether_dragV5(R, L_s, beta, n_t, n_tp, d_t, theta_0, omega, v_ref, h_ref, psi); 
+ 
+% *Frame Drag*
+    [Q_fDrag, T_fDrag] = frame_dragV5(R, L_s, beta, n_f, n_fp, d_f, theta_0, omega, v_ref, h_ref, psi); 
+    
+% *Update Tension T andTorque Q throughout system*
+    for i = 1:n_r   % For rotor polygons
+        T(i) = sum(T_rot(1:i)) +sum(T_tDrag(1:i))+sum(T_fDrag(1:i)) +T_l;
+        Q(i) = sum(Q_rot(1:i)) +sum(Q_tDrag(1:i))+sum(Q_fDrag(1:i));  % losses are found as negative values
+    end
+    
+    for i = n_r+1:length(T) % For other TRPT polygons
+        T(i) = T(i-1)+T_fDrag(i)+T_tDrag(i);
+        Q(i) = Q(i-1)+Q_fDrag(i)+Q_tDrag(i);
+    end    
+
+
+    %% Defining Constraints
+    % Ground scratch constraint
+    c(1) = R(1)+l_b - sum(L_s)*sin(beta)-R(end);
+    % Hub radius constraint
+    c(end+1:end+n_r) = l_b/2 - R(1:n_r);
+    % Deformation Angle constraint
+    c(end+1:end+n_L) = delta + pi/10 - delta_c ;     % safety factor of pi/10 is applied
+%     % Overtwisting
+%     c(end+1) = abs(imag(delta(~isreal(delta))));
+    ceq = [];
+end
