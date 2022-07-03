@@ -1,0 +1,88 @@
+function [WEI, WEI_g, WEI_f, WEI_t, WEI_b, WEI_l] = getWEI(R, L_s, L_t, T, Q, delta, l_b, l_c, l_bh, n_b) 
+global n_R n_L n_t n_f n_r T_l;
+
+% safety factor for tether stress
+sf = 5; 
+% Weight per unit volume [kg/m^3]
+rho_f = 1600;
+rho_t = 557; % 4mm LIROS D-Pro https://www.liros.com/userdata/files/LIROS_rope_catalogue_2022_2023_eng_210_x_297_mm_low_res.pdf
+rho_b = 100; % https://www.sciencedirect.com/topics/engineering/foam-density
+rho_l = 0.01; % [kg/N] 
+rho_g = 10; % [kg/m]
+
+% Youngs Modulus of carbon fibre and steel cable [Pa] http://www.performance-composites.com/carbonfibre/mechanicalproperties_2.asp
+% YM_f = 70e9; 
+% YM_t = 200e9; 
+
+% Allowable stress in compression, tension [Pa]
+TS_t = 249.8e6; %https://www.liros.com/userdata/files/LIROS_rope_catalogue_2022_2023_eng_210_x_297_mm_low_res.pdf
+CS_t = 0;
+TS_f = 570e6;   % https://www.engineeringtoolbox.com/wire-rope-strength-d_1518.html
+CS_f = 600e6;
+
+F_t = zeros(n_L,1);
+F_f = zeros(n_R,1);
+A_t = zeros(n_L,1);
+A_f = zeros(n_R,1);
+
+%A_t = d_t^2/4*pi *ones(n_L,1);
+
+for i = 1:n_R
+    % get angle between two frame sides
+    varphi = (2*n_f-4)*pi/2/n_f;  
+    if (i==1)
+        % get radial angle to rotational axis
+        phi = atan((cos(delta(i))*R(i)-R(i+1))/L_s(i)); 
+
+        % get radial forces acting on polygon
+        F_f(i) = T(i) *tan(phi) *cos(varphi/2)/2;
+        if F_f(i)<0     % negative force is defined as compression
+            A_f(i) = abs(F_f(i))/CS_f*sf; 
+        else
+            A_f(i) = abs(F_f(i))/TS_f*sf; 
+        end   
+    elseif (i==n_R)
+        % get radial angle to rotational axis
+        phi = atan((cos(delta(i-1))*R(i)-R(i-1))/L_s(i-1)); 
+        
+        % get radial forces acting on polygon
+        F_f(i) = T(i) *tan(phi) *cos(varphi/2)/2;
+        if F_f(i)<0     % negative force is defined as compression
+            A_f(i) = abs(F_f(i))/CS_f*sf; 
+        else
+            A_f(i) = abs(F_f(i))/TS_f*sf; 
+        end 
+    else
+        % get radial angle to rotational axis
+        phi1 = atan((cos(delta(i))*R(i)-R(i+1))/L_s(i));
+        phi2 = atan((cos(delta(i-1))*R(i)-R(i-1))/L_s(i-1));
+
+        % get radial forces acting on polygon
+        F_f(i) = T(i) *(tan(phi1)+tan(phi2)) *cos(varphi/2)/2;
+        if F_f(i)<0     % negative force is defined as compression
+            A_f(i) = abs(F_f(i))/CS_f*sf; 
+        else
+            A_f(i) = abs(F_f(i))/TS_f*sf; 
+        end           
+    end
+end
+ % find tether forces
+        F_t = T(1:end-1)'.*L_t./L_s;
+        A_t = F_t./TS_t *sf; 
+        
+A_f(end) = A_f(end-1);
+L_f = 2*R*sin(pi/n_f);
+
+WEI_f = sum(A_f.*L_f)*n_f*rho_f;
+WEI_t = sum(A_t.*L_t)*n_t*rho_t;
+WEI_b = l_b*l_c*l_bh*n_b*n_r*rho_b;
+WEI_g = R(end)*rho_g;
+WEI_l = T_l* rho_l;
+
+if n_f<3  % When frame only has two corners, then there are less frames
+    WEI_f = sum(A_f.*L_f)*n_f*rho_f/2; 
+end
+
+WEI = WEI_f + WEI_t + WEI_b + WEI_g + WEI_l; 
+
+end
